@@ -1,0 +1,13 @@
+[package]
+name = "inspector-repro"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+revm = { git = "https://github.com/nomicfoundation/revm", rev = "4722477" }
+revm-bytecode = { git = "https://github.com/nomicfoundation/revm", rev = "4722477" }
+revm-database = { git = "https://github.com/nomicfoundation/revm", rev = "4722477" }
+revm-inspector = { git = "https://github.com/nomicfoundation/revm", rev = "4722477" }
+revm-interpreter = { git = "https://github.com/nomicfoundation/revm", rev = "4722477" }
+revm-primitives = { git = "https://github.com/nomicfoundation/revm", rev = "4722477" }
+revm-wiring = { git = "https://github.com/nomicfoundation/revm", rev = "4722477" }
