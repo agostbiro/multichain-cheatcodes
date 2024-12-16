@@ -5,6 +5,7 @@
 //! are blockers for a multichain Solidity test implementation.
 //!
 //! Discovered issues:
+//! - Can't get precompiles in `Inspector::Call`. Previously this was accessed via `EvmContext::precompiles`.
 //! - `Evm::transact()` implementation hard-codes mainnet `HaltReason`.
 //! - `InspectorCtx for InspectorContext` implementation hard-codes mainnet `EthInterpreter`.
 //! - When using a generic `PrecompileProvider` along with an `Inspector`, the `PrecompileProvider` needs the
