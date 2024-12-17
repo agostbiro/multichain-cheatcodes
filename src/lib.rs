@@ -297,7 +297,6 @@ pub fn commit_transaction<InspectorT, BlockT, TxT, CfgT, PrecompileT>(
 ) -> Result<(), EVMError<<Backend as Database>::Error, <TxT as Transaction>::TransactionError>>
 where
     InspectorT: Inspector<
-            // Explicit lifetime needed for `&mut Backend`
             Context = Context<BlockT, TxT, CfgT, Backend>,
             // Generic interpreter types are not supported yet in the `Evm` implementation
             InterpreterTypes = EthInterpreter,
