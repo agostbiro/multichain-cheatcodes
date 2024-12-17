@@ -204,9 +204,10 @@ where
     fn apply_cheatcode(&mut self, context: &mut Context<BlockT, TxT, CfgT, Backend>) {
         // The problematic cheatcodes do recursive calls where we launch a new transaction using the same inspector.
         // They don't work properly due to two mutable borrows of `context.journaled_state` which we work around by
-        // cloning the `Backend` to make the calls. With the current released version of REVM it works, because
-        // the DB is a sibling of the journaled state, not a child so both can be mutably borrowed at the same
-        // time.
+        // cloning the `Backend` to make the calls. But this makes the code incorrect, because `DatabaseExt` methods
+        // mutate the cloned object instead of the original `Backend`. With the current released version of REVM
+        // cloning is not necessary, because the DB is a sibling of the journaled state, not a child so both can be
+        // mutably borrowed at the same time.
 
         // `transact` cheatcode would do this
         context
@@ -313,6 +314,7 @@ where
     // Create new journaled state and backend with the same DB and journaled state as the original for the transaction.
     // This new backend and state will be discarded after the transaction is done and the changes are applied to the
     // original backend.
+    // Mimics https://github.com/foundry-rs/foundry/blob/25cc1ac68b5f6977f23d713c01ec455ad7f03d21/crates/evm/core/src/backend/mod.rs#L1950-L1953
     let new_db = journaled_state.database.db.clone();
     let new_backend = Backend::new(new_db);
     let mut new_journaled_state = JournaledState::new(journaled_state.spec, new_backend);
