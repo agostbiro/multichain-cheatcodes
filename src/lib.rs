@@ -6,8 +6,6 @@
 //! cheatcodes that proved difficult to implement with the new interface.
 //! Both of these cheatcodes initiate transactions from a call step in the cheatcode inspector.
 
-pub mod custom_journaled_state;
-
 use std::{convert::Infallible, fmt::Debug};
 
 use revm::{
@@ -23,7 +21,7 @@ use revm::{
     precompile::{Address, B256},
     specification::hardfork::SpecId,
     state::{Account, EvmState, TransientStorage},
-    Context, Database, DatabaseCommit, Evm, JournalEntry,
+    Context, Database, DatabaseCommit, Evm, JournalEntry, JournaledState,
 };
 use revm_bytecode::Bytecode;
 use revm_database::InMemoryDB;
@@ -34,15 +32,12 @@ use revm_inspector::{
 use revm_interpreter::{interpreter::EthInterpreter, CallInputs, CallOutcome};
 use revm_primitives::{Log, U256};
 
-use crate::custom_journaled_state::CustomJournaledState;
-
 /// Backend for cheatcodes.
 /// The problematic cheatcodes are only supported in fork mode, so we'll omit the non-fork behavior of the `Backend`.
 #[derive(Clone, Debug)]
 pub struct Backend {
     /// In fork mode, Foundry stores (`JournaledState`, `Database`) pairs for each fork.
-    db: InMemoryDB,
-    journaled_state: CustomJournaledState,
+    journaled_state: JournaledState<InMemoryDB>,
     /// Counters to be able to assert that we mutated the object that we expected to mutate.
     method_with_inspector_counter: usize,
     method_without_inspector_counter: usize,
@@ -51,8 +46,7 @@ pub struct Backend {
 impl Backend {
     pub fn new(spec: SpecId, db: InMemoryDB) -> Self {
         Self {
-            db,
-            journaled_state: CustomJournaledState::new(spec),
+            journaled_state: JournaledState::new(spec, db),
             method_with_inspector_counter: 0,
             method_without_inspector_counter: 0,
         }
@@ -69,15 +63,15 @@ impl Journal for Backend {
     }
 
     fn db(&self) -> &Self::Database {
-        &self.db
+        &self.journaled_state.database
     }
 
     fn db_mut(&mut self) -> &mut Self::Database {
-        &mut self.db
+        &mut self.journaled_state.database
     }
 
     fn sload(&mut self, address: Address, key: U256) -> Result<StateLoad<U256>, <Self::Database as Database>::Error> {
-        self.journaled_state.sload(&mut self.db, address, key)
+        self.journaled_state.sload(address, key)
     }
 
     fn sstore(
@@ -86,7 +80,7 @@ impl Journal for Backend {
         key: U256,
         value: U256,
     ) -> Result<StateLoad<SStoreResult>, <Self::Database as Database>::Error> {
-        self.journaled_state.sstore(&mut self.db, address, key, value)
+        self.journaled_state.sstore(address, key, value)
     }
 
     fn tload(&mut self, address: Address, key: U256) -> U256 {
@@ -102,7 +96,7 @@ impl Journal for Backend {
     }
 
     fn selfdestruct(&mut self, address: Address, target: Address) -> Result<StateLoad<SelfDestructResult>, Infallible> {
-        self.journaled_state.selfdestruct(&mut self.db, address, target)
+        self.journaled_state.selfdestruct(address, target)
     }
 
     fn warm_account(&mut self, address: Address) {
@@ -120,8 +114,7 @@ impl Journal for Backend {
         address: Address,
         storage_keys: impl IntoIterator<Item = U256>,
     ) -> Result<(), <Self::Database as Database>::Error> {
-        self.journaled_state
-            .initial_account_load(&mut self.db, address, storage_keys)?;
+        self.journaled_state.initial_account_load(address, storage_keys)?;
         Ok(())
     }
 
@@ -131,7 +124,7 @@ impl Journal for Backend {
 
     fn transfer(&mut self, from: &Address, to: &Address, balance: U256) -> Result<Option<TransferError>, Infallible> {
         // TODO : Handle instruction result
-        self.journaled_state.transfer(&mut self.db, from, to, balance)
+        self.journaled_state.transfer(from, to, balance)
     }
 
     fn touch_account(&mut self, address: Address) {
@@ -143,15 +136,15 @@ impl Journal for Backend {
     }
 
     fn load_account(&mut self, address: Address) -> Result<StateLoad<&mut Account>, Infallible> {
-        self.journaled_state.load_account(&mut self.db, address)
+        self.journaled_state.load_account(address)
     }
 
     fn load_account_code(&mut self, address: Address) -> Result<StateLoad<&mut Account>, Infallible> {
-        self.journaled_state.load_code(&mut self.db, address)
+        self.journaled_state.load_code(address)
     }
 
     fn load_account_delegated(&mut self, address: Address) -> Result<AccountLoad, Infallible> {
-        self.journaled_state.load_account_delegated(&mut self.db, address)
+        self.journaled_state.load_account_delegated(address)
     }
 
     fn checkpoint(&mut self) -> JournalCheckpoint {
@@ -193,13 +186,14 @@ impl Journal for Backend {
     }
 
     fn finalize(&mut self) -> Result<Self::FinalOutput, <Self::Database as Database>::Error> {
-        let CustomJournaledState {
+        let JournaledState {
             state,
             transient_storage,
             logs,
             depth,
             journal,
             // kept, see [Self::new]
+            database: _,
             spec: _,
             warm_preloaded_addresses: _,
         } = &mut self.journaled_state;
@@ -470,8 +464,11 @@ where
     let result = evm.transact()?;
 
     // Persist the changes to the original backend.
-    backend.db.commit(result.state);
-    update_state(&mut backend.journaled_state.state, &mut backend.db)?;
+    backend.journaled_state.database.commit(result.state);
+    update_state(
+        &mut backend.journaled_state.state,
+        &mut backend.journaled_state.database,
+    )?;
 
     Ok(())
 }
