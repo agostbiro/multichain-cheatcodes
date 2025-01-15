@@ -14,11 +14,12 @@ use revm::{
         host::{SStoreResult, SelfDestructResult},
         journaled_state::{AccountLoad, JournalCheckpoint, StateLoad, TransferError},
         result::{EVMError, InvalidTransaction},
-        Block, Journal, Transaction,
+        transaction::TransactionError,
+        Block, BlockGetter, CfgGetter, Journal, JournalGetter, Transaction, TransactionGetter,
     },
     handler::EthPrecompileProvider,
     handler_interface::PrecompileProvider,
-    precompile::{Address, B256},
+    precompile::{Address, HashSet, B256},
     specification::hardfork::SpecId,
     state::{Account, EvmState, TransientStorage},
     Context, Database, DatabaseCommit, Evm, JournalEntry, JournaledState,
@@ -26,10 +27,10 @@ use revm::{
 use revm_bytecode::Bytecode;
 use revm_database::InMemoryDB;
 use revm_inspector::{
-    inspector_handler, inspectors::TracerEip3155, GetInspector, Inspector, InspectorContext, InspectorHandler,
-    JournalExt,
+    inspector_context::InspectorContext, inspector_handler, inspectors::TracerEip3155, journal::JournalExt,
+    GetInspector, Inspector, InspectorHandler,
 };
-use revm_interpreter::{interpreter::EthInterpreter, CallInputs, CallOutcome};
+use revm_interpreter::{interpreter::EthInterpreter, CallInputs, CallOutcome, InterpreterResult, InterpreterTypes};
 use revm_primitives::{Log, U256};
 
 /// Backend for cheatcodes.
@@ -62,12 +63,12 @@ impl Journal for Backend {
         Self::new(SpecId::LATEST, database)
     }
 
-    fn db(&self) -> &Self::Database {
-        &self.journaled_state.database
+    fn db(&mut self) -> &mut Self::Database {
+        &mut self.journaled_state.database
     }
 
-    fn db_mut(&mut self) -> &mut Self::Database {
-        &mut self.journaled_state.database
+    fn db_ref(&self) -> &Self::Database {
+        &self.journaled_state.database
     }
 
     fn sload(&mut self, address: Address, key: U256) -> Result<StateLoad<U256>, <Self::Database as Database>::Error> {
@@ -123,7 +124,6 @@ impl Journal for Backend {
     }
 
     fn transfer(&mut self, from: &Address, to: &Address, balance: U256) -> Result<Option<TransferError>, Infallible> {
-        // TODO : Handle instruction result
         self.journaled_state.transfer(from, to, balance)
     }
 
@@ -143,7 +143,7 @@ impl Journal for Backend {
         self.journaled_state.load_code(address)
     }
 
-    fn load_account_delegated(&mut self, address: Address) -> Result<AccountLoad, Infallible> {
+    fn load_account_delegated(&mut self, address: Address) -> Result<StateLoad<AccountLoad>, Infallible> {
         self.journaled_state.load_account_delegated(address)
     }
 
@@ -192,10 +192,10 @@ impl Journal for Backend {
             logs,
             depth,
             journal,
-            // kept, see [Self::new]
             database: _,
             spec: _,
             warm_preloaded_addresses: _,
+            precompiles: _,
         } = &mut self.journaled_state;
 
         *transient_storage = TransientStorage::default();
@@ -206,6 +206,14 @@ impl Journal for Backend {
 
         Ok((state, logs))
     }
+
+    fn warm_precompiles(&mut self, addresses: HashSet<Address>) {
+        self.journaled_state.warm_precompiles(addresses)
+    }
+
+    fn precompile_addresses(&self) -> &HashSet<Address> {
+        self.journaled_state.precompile_addresses()
+    }
 }
 
 impl JournalExt for Backend {
@@ -215,6 +223,14 @@ impl JournalExt for Backend {
 
     fn last_journal(&self) -> &[JournalEntry] {
         self.journaled_state.journal.last().expect("Journal is never empty")
+    }
+
+    fn evm_state(&self) -> &EvmState {
+        &self.journaled_state.state
+    }
+
+    fn evm_state_mut(&mut self) -> &mut EvmState {
+        &mut self.journaled_state.state
     }
 }
 
@@ -228,15 +244,15 @@ pub trait DatabaseExt: Journal {
         env: Env<BlockT, TxT, CfgT>,
         inspector: InspectorT,
     ) where
-        InspectorT: Inspector<Context = Context<BlockT, TxT, CfgT, InMemoryDB, Backend>, InterpreterTypes = EthInterpreter>
-            + GetInspector<Inspector = InspectorT>,
+        InspectorT: Inspector<Context<BlockT, TxT, CfgT, InMemoryDB, Backend>, EthInterpreter>
+            + GetInspector<Context<BlockT, TxT, CfgT, InMemoryDB, Backend>, EthInterpreter>,
         BlockT: Block,
         TxT: Transaction,
-        <TxT as Transaction>::TransactionError: From<InvalidTransaction>,
         CfgT: Cfg,
         PrecompileT: PrecompileProvider<
-            Context = InspectorContext<InspectorT, BlockT, TxT, CfgT, InMemoryDB, Backend>,
-            Error = EVMError<Infallible, <TxT as Transaction>::TransactionError>,
+            Context = InspectorContext<InspectorT, InMemoryDB, Context<BlockT, TxT, CfgT, InMemoryDB, Backend>>,
+            Output = InterpreterResult,
+            Error = EVMError<Infallible, InvalidTransaction>,
         >;
 
     /// Mimics `DatabaseExt::roll_fork_to_transaction`
@@ -244,7 +260,6 @@ pub trait DatabaseExt: Journal {
     where
         BlockT: Block,
         TxT: Transaction,
-        <TxT as Transaction>::TransactionError: From<InvalidTransaction>,
         CfgT: Cfg;
     // Can't declare a method that takes the precompile provider as a generic parameter and constructs a
     // new inspector, because the `PrecompileProvider` trait needs to know the inspector type
@@ -254,7 +269,7 @@ pub trait DatabaseExt: Journal {
     /*
     PrecompileT: PrecompileProvider<
         Context = InspectorContext<InspectorT, BlockT, TxT, CfgT, InMemoryDB, Backend>,
-        Error = EVMError<Infallible, <TxT as Transaction>::TransactionError>,
+        Error = EVMError<Infallible,
     >
     */
 }
@@ -265,15 +280,15 @@ impl DatabaseExt for Backend {
         env: Env<BlockT, TxT, CfgT>,
         inspector: InspectorT,
     ) where
-        InspectorT: Inspector<Context = Context<BlockT, TxT, CfgT, InMemoryDB, Backend>, InterpreterTypes = EthInterpreter>
-            + GetInspector<Inspector = InspectorT>,
+        InspectorT: Inspector<Context<BlockT, TxT, CfgT, InMemoryDB, Backend>, EthInterpreter>
+            + GetInspector<Context<BlockT, TxT, CfgT, InMemoryDB, Backend>, EthInterpreter>,
         BlockT: Block,
         TxT: Transaction,
-        <TxT as Transaction>::TransactionError: From<InvalidTransaction>,
         CfgT: Cfg,
         PrecompileT: PrecompileProvider<
-            Context = InspectorContext<InspectorT, BlockT, TxT, CfgT, InMemoryDB, Backend>,
-            Error = EVMError<Infallible, <TxT as Transaction>::TransactionError>,
+            Context = InspectorContext<InspectorT, InMemoryDB, Context<BlockT, TxT, CfgT, InMemoryDB, Backend>>,
+            Output = InterpreterResult,
+            Error = EVMError<Infallible, InvalidTransaction>,
         >,
     {
         commit_transaction::<InspectorT, BlockT, TxT, CfgT, PrecompileT>(self, env, inspector).unwrap();
@@ -288,11 +303,10 @@ impl DatabaseExt for Backend {
         > + GetInspector<Inspector = InspectorT>,*/
         BlockT: Block,
         TxT: Transaction,
-        <TxT as Transaction>::TransactionError: From<InvalidTransaction>,
         CfgT: Cfg,
         /*PrecompileT: PrecompileProvider<
             Context = InspectorContext<InspectorT, BlockT, TxT, CfgT, InMemoryDB, Backend>,
-            Error = EVMError<Infallible, <TxT as Transaction>::TransactionError>,
+            Error = EVMError<Infallible,
         >,*/
     {
         let inspector = TracerEip3155::new(Box::new(std::io::sink()));
@@ -302,18 +316,15 @@ impl DatabaseExt for Backend {
             BlockT,
             TxT,
             CfgT,
-            // Since we can't have a generic precompiles type param as explained in the trait definition, we're using a
+            // Since we can't have a generic precompiles type param as explained in the trait definition, we're using
             // concrete type here.
             EthPrecompileProvider<
                 InspectorContext<
                     TracerEip3155<Context<BlockT, TxT, CfgT, InMemoryDB, Backend>, EthInterpreter>,
-                    BlockT,
-                    TxT,
-                    CfgT,
                     InMemoryDB,
-                    Backend,
+                    Context<BlockT, TxT, CfgT, InMemoryDB, Backend>,
                 >,
-                EVMError<Infallible, <TxT as Transaction>::TransactionError>,
+                EVMError<Infallible, InvalidTransaction>,
             >,
         >(self, env, inspector)
         .unwrap();
@@ -327,53 +338,56 @@ impl DatabaseExt for Backend {
 #[derive(Clone, Default)]
 pub struct Cheatcodes<BlockT, TxT, CfgT> {
     call_count: usize,
-    phantom: core::marker::PhantomData<(Backend, BlockT, TxT, CfgT)>,
+    phantom: core::marker::PhantomData<(BlockT, TxT, CfgT)>,
 }
 
 impl<BlockT, TxT, CfgT> Cheatcodes<BlockT, TxT, CfgT>
 where
     BlockT: Block + Clone,
     TxT: Transaction + Clone,
-    <TxT as Transaction>::TransactionError: From<InvalidTransaction>,
     CfgT: Cfg + Clone,
 {
     fn apply_cheatcode(&mut self, context: &mut Context<BlockT, TxT, CfgT, InMemoryDB, Backend>) {
+        // TODO avoid clone
+        let block = context.block.clone();
+        let tx = context.tx.clone();
+        let cfg = context.cfg.clone();
+
         // `transact` cheatcode would do this
         context
-            .journaled_state
+            .journal()
             .method_that_takes_inspector_as_argument::<&mut Self, BlockT, TxT, CfgT, EthPrecompileProvider<
-                InspectorContext<&mut Self, BlockT, TxT, CfgT, InMemoryDB, Backend>,
-                EVMError<Infallible, <TxT as Transaction>::TransactionError>,
+                InspectorContext<&mut Self, InMemoryDB, Context<BlockT, TxT, CfgT, InMemoryDB, Backend>>,
+                EVMError<Infallible, InvalidTransaction>,
             >>(
                 Env {
-                    block: context.block.clone(),
-                    tx: context.tx.clone(),
-                    cfg: context.cfg.clone(),
+                    block: block.clone(),
+                    tx: tx.clone(),
+                    cfg: cfg.clone(),
                 },
                 self,
             );
 
         // `rollFork(bytes32 transaction)` cheatcode would do this
-        context.journaled_state.method_that_constructs_inspector(Env {
-            block: context.block.clone(),
-            tx: context.tx.clone(),
-            cfg: context.cfg.clone(),
-        });
+        context
+            .journal()
+            .method_that_constructs_inspector::<BlockT, TxT, CfgT>(Env { block, tx, cfg });
     }
 }
 
-impl<BlockT, TxT, CfgT> Inspector for Cheatcodes<BlockT, TxT, CfgT>
+impl<BlockT, TxT, CfgT> Inspector<Context<BlockT, TxT, CfgT, InMemoryDB, Backend>, EthInterpreter>
+    for Cheatcodes<BlockT, TxT, CfgT>
 where
     BlockT: Block + Clone,
     TxT: Transaction + Clone,
-    <TxT as Transaction>::TransactionError: From<InvalidTransaction>,
     CfgT: Cfg + Clone,
 {
-    type Context = Context<BlockT, TxT, CfgT, InMemoryDB, Backend>;
-    type InterpreterTypes = EthInterpreter;
-
     /// Note that precompiles are no longer accessible via `EvmContext::precompiles`.
-    fn call(&mut self, context: &mut Self::Context, _inputs: &mut CallInputs) -> Option<CallOutcome> {
+    fn call(
+        &mut self,
+        context: &mut Context<BlockT, TxT, CfgT, InMemoryDB, Backend>,
+        _inputs: &mut CallInputs,
+    ) -> Option<CallOutcome> {
         self.call_count += 1;
         // Don't apply cheatcodes recursively.
         if self.call_count == 1 {
@@ -411,20 +425,20 @@ pub fn commit_transaction<InspectorT, BlockT, TxT, CfgT, PrecompileT>(
     backend: &mut Backend,
     env: Env<BlockT, TxT, CfgT>,
     inspector: InspectorT,
-) -> Result<(), EVMError<Infallible, <TxT as Transaction>::TransactionError>>
+) -> Result<(), EVMError<Infallible, InvalidTransaction>>
 where
     InspectorT: Inspector<
-            Context = Context<BlockT, TxT, CfgT, InMemoryDB, Backend>,
+            Context<BlockT, TxT, CfgT, InMemoryDB, Backend>,
             // Generic interpreter types are not supported yet in the `Evm` implementation
-            InterpreterTypes = EthInterpreter,
-        > + GetInspector<Inspector = InspectorT>,
+            EthInterpreter,
+        > + GetInspector<Context<BlockT, TxT, CfgT, InMemoryDB, Backend>, EthInterpreter>,
     BlockT: Block,
     TxT: Transaction,
-    <TxT as Transaction>::TransactionError: From<InvalidTransaction>,
     CfgT: Cfg,
     PrecompileT: PrecompileProvider<
-        Context = InspectorContext<InspectorT, BlockT, TxT, CfgT, InMemoryDB, Backend>,
-        Error = EVMError<Infallible, <TxT as Transaction>::TransactionError>,
+        Context = InspectorContext<InspectorT, InMemoryDB, Context<BlockT, TxT, CfgT, InMemoryDB, Backend>>,
+        Output = InterpreterResult,
+        Error = EVMError<Infallible, InvalidTransaction>,
     >,
 {
     // Create new journaled state and backend with the same DB and journaled state as the original for the transaction.
@@ -443,23 +457,18 @@ where
     };
 
     let inspector_context =
-        InspectorContext::<InspectorT, BlockT, TxT, CfgT, InMemoryDB, Backend>::new(context, inspector);
+        InspectorContext::<InspectorT, InMemoryDB, Context<BlockT, TxT, CfgT, InMemoryDB, Backend>>::new(
+            context, inspector,
+        );
 
-    let handler = inspector_handler::<
-        InspectorContext<InspectorT, BlockT, TxT, CfgT, InMemoryDB, Backend>,
-        EVMError<Infallible, <TxT as Transaction>::TransactionError>,
-        PrecompileT,
-    >();
-
-    let mut evm = Evm::<
-        EVMError<Infallible, <TxT as Transaction>::TransactionError>,
-        InspectorContext<InspectorT, BlockT, TxT, CfgT, InMemoryDB, Backend>,
-        InspectorHandler<
-            InspectorContext<InspectorT, BlockT, TxT, CfgT, InMemoryDB, Backend>,
-            EVMError<Infallible, <TxT as Transaction>::TransactionError>,
+    let mut evm = Evm::new(
+        inspector_context,
+        inspector_handler::<
+            InspectorContext<InspectorT, InMemoryDB, Context<BlockT, TxT, CfgT, InMemoryDB, Backend>>,
+            EVMError<Infallible, InvalidTransaction>,
             PrecompileT,
-        >,
-    >::new(inspector_context, handler);
+        >(),
+    );
 
     let result = evm.transact()?;
 
@@ -493,9 +502,12 @@ mod tests {
     #[test]
     fn cheatcodes_inspector() {
         type InspectorT<'cheatcodes> = &'cheatcodes mut Cheatcodes<BlockEnv, TxEnv, CfgEnv>;
-        type ErrorT = EVMError<Infallible, <TxEnv as Transaction>::TransactionError>;
-        type InspectorContextT<'cheatcodes> =
-            InspectorContext<InspectorT<'cheatcodes>, BlockEnv, TxEnv, CfgEnv, InMemoryDB, Backend>;
+        type ErrorT = EVMError<Infallible, InvalidTransaction>;
+        type InspectorContextT<'cheatcodes> = InspectorContext<
+            InspectorT<'cheatcodes>,
+            InMemoryDB,
+            Context<BlockEnv, TxEnv, CfgEnv, InMemoryDB, Backend>,
+        >;
         type PrecompileT<'cheatcodes> = EthPrecompileProvider<InspectorContextT<'cheatcodes>, ErrorT>;
 
         let backend = Backend::new(SpecId::LATEST, InMemoryDB::default());
@@ -510,23 +522,17 @@ mod tests {
             chain: (),
             error: Ok(()),
         };
-        let inspector_context =
-            InspectorContext::<InspectorT, BlockEnv, TxEnv, CfgEnv, InMemoryDB, Backend>::new(context, &mut inspector);
-        let handler = inspector_handler::<
-            InspectorContext<InspectorT, BlockEnv, TxEnv, CfgEnv, InMemoryDB, Backend>,
-            EVMError<Infallible, <TxEnv as Transaction>::TransactionError>,
-            PrecompileT,
-        >();
+        let inspector_context = InspectorContext::<
+            InspectorT,
+            InMemoryDB,
+            Context<BlockEnv, TxEnv, CfgEnv, InMemoryDB, Backend>,
+        >::new(context, &mut inspector);
+        let handler = inspector_handler::<InspectorContextT, ErrorT, PrecompileT>();
 
-        let mut evm = Evm::<
-            EVMError<Infallible, <TxEnv as Transaction>::TransactionError>,
-            InspectorContext<InspectorT, BlockEnv, TxEnv, CfgEnv, InMemoryDB, Backend>,
-            InspectorHandler<
-                InspectorContext<InspectorT, BlockEnv, TxEnv, CfgEnv, InMemoryDB, Backend>,
-                EVMError<Infallible, <TxEnv as Transaction>::TransactionError>,
-                PrecompileT,
-            >,
-        >::new(inspector_context, handler);
+        let mut evm = Evm::<ErrorT, InspectorContextT, InspectorHandler<InspectorContextT, ErrorT, PrecompileT>>::new(
+            inspector_context,
+            handler,
+        );
 
         evm.transact().unwrap();
 

@@ -4,10 +4,9 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-revm = { git = "https://github.com/bluealloy/revm", rev = "03ea24b" }
-revm-bytecode = { git = "https://github.com/bluealloy/revm", rev = "03ea24b" }
-revm-database = { git = "https://github.com/bluealloy/revm", rev = "03ea24b" }
-revm-inspector = { git = "https://github.com/bluealloy/revm", rev = "03ea24b", features = ["std", "serde-json"] }
-revm-interpreter = { git = "https://github.com/bluealloy/revm", rev = "03ea24b" }
-revm-primitives = { git = "https://github.com/bluealloy/revm", rev = "03ea24b" }
-serde = { version = "1.0.215", features = ["derive"] }
+revm = { git = "https://github.com/bluealloy/revm", rev = "234405c" }
+revm-bytecode = { git = "https://github.com/bluealloy/revm", rev = "234405c" }
+revm-database = { git = "https://github.com/bluealloy/revm", rev = "234405c" }
+revm-inspector = { git = "https://github.com/bluealloy/revm", rev = "234405c", features = ["std", "serde-json"] }
+revm-interpreter = { git = "https://github.com/bluealloy/revm", rev = "234405c" }
+revm-primitives = { git = "https://github.com/bluealloy/revm", rev = "234405c" }
